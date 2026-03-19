@@ -52,7 +52,7 @@ SCHOOL_API_KEY = os.getenv("SCHOOL_API_KEY")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
 API_BASE      = "https://api.1000.school"
-GEMINI_MODEL  = "gemini-2.5-flash"
+GEMINI_MODEL  = "gemini-2.0-flash"
 GEMINI_URL    = (
     f"https://generativelanguage.googleapis.com/v1beta/models/"
     f"{GEMINI_MODEL}:generateContent"
