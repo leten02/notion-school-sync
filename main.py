@@ -13,6 +13,8 @@ Notion 페이지 → 1000.school 일간 스니펫 자동 작성
 import os
 import sys
 import time
+import json
+import hashlib
 from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
 import requests
@@ -44,11 +46,17 @@ load_dotenv()
 
 # ─── 설정 ────────────────────────────────────────────────────────────────────
 
-NOTION_TOKEN   = os.getenv("NOTION_TOKEN")    # 노션 Integration 토큰
-NOTION_PAGE_ID = os.getenv("NOTION_PAGE_ID")  # 부모 페이지 ID
-SCHOOL_API_KEY = os.getenv("SCHOOL_API_KEY")  # 1000.school API 토큰
+NOTION_TOKEN   = os.getenv("NOTION_TOKEN")
+NOTION_PAGE_ID = os.getenv("NOTION_PAGE_ID")
+SCHOOL_API_KEY = os.getenv("SCHOOL_API_KEY")
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
-API_BASE = "https://api.1000.school"
+API_BASE      = "https://api.1000.school"
+GEMINI_MODEL  = "gemini-2.5-flash"
+GEMINI_URL    = (
+    f"https://generativelanguage.googleapis.com/v1beta/models/"
+    f"{GEMINI_MODEL}:generateContent"
+)
 
 notion = Client(auth=NOTION_TOKEN)
 
@@ -160,6 +168,128 @@ def _rich_text(rich_text: list) -> str:
     return "".join(t.get("plain_text", "") for t in rich_text)
 
 
+# ─── 체크박스 감지 ───────────────────────────────────────────────────────────
+
+def get_polish_checkbox(page_id: str) -> tuple[bool, str | None]:
+    """
+    페이지에서 'Gemini로 다듬기' 체크박스 상태와 블록 ID 반환
+    returns: (checked, block_id)
+    """
+    resp = notion.blocks.children.list(block_id=page_id, page_size=20)
+    for block in resp["results"]:
+        if block.get("type") == "to_do":
+            text = _rich_text(block["to_do"].get("rich_text", []))
+            if POLISH_CHECKBOX_TEXT in text or "Gemini" in text or "다듬기" in text:
+                return block["to_do"]["checked"], block["id"]
+    return False, None
+
+
+def uncheck_polish_checkbox(block_id: str):
+    """polish 완료 후 체크박스를 다시 해제"""
+    notion.blocks.update(
+        block_id=block_id,
+        to_do={"checked": False},
+    )
+
+
+# ─── Gemini Polish (노션 메모 → 정형화된 스니펫) ─────────────────────────────
+
+def gemini_polish_content(raw_content: str, snippet_date: str) -> str:
+    """
+    노션 원문(짧은 메모 or 템플릿 작성본)을
+    Gemini로 다듬어 1000.school 스니펫 형식으로 변환
+    """
+    if not GEMINI_API_KEY:
+        print("   ⚠️  GEMINI_API_KEY 없음 → polish 스킵", flush=True)
+        return raw_content
+
+    prompt = "\n".join([
+        f"입력된 노션 데일리 메모를 바탕으로 {snippet_date}의 데일리 회고를 작성해라.",
+        "입력은 짧고 거칠 수 있지만, 과장하지 말고 입력에 없는 사실은 만들지 마라.",
+        "출력은 반드시 JSON 객체 하나만 반환해라.",
+        "태스크별로 '오늘 한 일 / 하이라이트 / 로우라이트 / 내일의 우선순위'를 각각 반복해서 쓰지 말아라.",
+        "반드시 하루 전체 기준으로 회고를 통합해서 작성해라.",
+        "하이라이트와 로우라이트는 하루에서 중요도가 높은 것만 1~3개 정도로 추려서 작성해라.",
+        "문체는 노션 데일리 기록에 맞게 간결하지만 의미 있게 작성해라.",
+        "각 필드는 모두 한국어 문자열로 작성해라.",
+        "입력에 없는 사실은 지어내지 말고, 추론이 필요하면 보수적으로 작성해라.",
+        "lowlight는 명확한 문제가 없으면 '특별한 로우라이트 없음'처럼 정직하게 작성해라.",
+        "team_value는 오늘 팀에 준 기여를 협업 관점에서 작성해라.",
+        "learning_or_note는 오늘의 배움이나 남길 말을 한두 문장으로 작성해라.",
+        "health_score는 1부터 10 사이의 정수로 작성해라.",
+        "JSON 키는 다음만 사용해라: today_work, purpose, highlight, lowlight, tomorrow_priority, team_value, learning_or_note, health_score",
+        "",
+        "[노션 원문 시작]",
+        raw_content,
+        "[노션 원문 끝]",
+    ])
+
+    payload = {
+        "contents": [{"role": "user", "parts": [{"text": prompt}]}],
+        "generationConfig": {
+            "temperature": 0.5,
+            "responseMimeType": "application/json",
+        },
+    }
+
+    # 최대 3번 재시도
+    for attempt in range(1, 4):
+        resp = requests.post(
+            GEMINI_URL,
+            params={"key": GEMINI_API_KEY},
+            json=payload,
+            timeout=60,
+        )
+        if resp.ok:
+            break
+        if resp.status_code not in (429, 500, 503) or attempt == 3:
+            raise RuntimeError(f"Gemini 요청 실패: {resp.status_code} / {resp.text[:200]}")
+        time.sleep(attempt * 1.5)
+
+    # 응답 파싱
+    parts = resp.json().get("candidates", [{}])[0].get("content", {}).get("parts", [])
+    raw_text = "".join(p.get("text", "") for p in parts).strip()
+
+    # JSON 추출
+    if raw_text.startswith("{"):
+        parsed = json.loads(raw_text)
+    else:
+        import re
+        m = re.search(r'\{[\s\S]*\}', raw_text)
+        if not m:
+            raise ValueError("Gemini 응답에서 JSON을 찾지 못했습니다.")
+        parsed = json.loads(m.group(0))
+
+    health = int(parsed.get("health_score", 5))
+    health = max(1, min(10, health))
+
+    return "\n".join([
+        "## 오늘 한 일",
+        f"- {parsed.get('today_work', '')}",
+        "",
+        "## 수행 목적",
+        f"- {parsed.get('purpose', '')}",
+        "",
+        "## 하이라이트",
+        f"- {parsed.get('highlight', '')}",
+        "",
+        "## 로우라이트",
+        f"- {parsed.get('lowlight', '')}",
+        "",
+        "## 내일의 우선순위",
+        f"- {parsed.get('tomorrow_priority', '')}",
+        "",
+        "## 오늘 내가 팀에 기여한 가치",
+        f"- {parsed.get('team_value', '')}",
+        "",
+        "## 오늘의 배움 또는 남길 말",
+        f"- {parsed.get('learning_or_note', '')}",
+        "",
+        "## 헬스 체크 (10점)",
+        f"- {health}/10",
+    ])
+
+
 # ─── 1000.school 일간 스니펫 작성 ─────────────────────────────────────────────
 
 def get_today_snippet(headers: dict) -> dict | None:
@@ -207,20 +337,31 @@ def get_page_last_edited(page_id: str) -> str:
     return resp.get("last_edited_time", "")
 
 
-def run_once() -> bool:
-    """한 번 실행. 업로드 성공 시 True 반환"""
+def run_once(polish: bool = False) -> bool:
+    """
+    한 번 실행. 업로드 성공 시 True 반환
+    polish=True 이면 Gemini로 내용을 다듬은 후 업로드
+    """
     today = effective_date()
     title = today.strftime("%Y-%m-%d")
 
     page_id = find_today_child_page(NOTION_PAGE_ID)
     if not page_id:
-        print(f"❌ '{title}' 하위 페이지 없음. 노션에서 페이지를 만들어주세요.", flush=True)
+        print(f"❌ '{title}' 하위 페이지 없음.", flush=True)
         return False
 
     content = get_notion_content(page_id)
     if not content.strip():
         print("⏳ 페이지 내용이 비어있습니다.", flush=True)
         return False
+
+    if polish:
+        print(f"[{_now()}] ✨ Gemini 다듬기 시작...", flush=True)
+        try:
+            content = gemini_polish_content(content, title)
+            print(f"[{_now()}] ✅ Gemini 다듬기 완료", flush=True)
+        except Exception as e:
+            print(f"[{_now()}] ⚠️  Gemini 다듬기 실패 → 원문 그대로 업로드: {e}", flush=True)
 
     result = save_snippet(content)
     print(f"✅ 업로드 완료! 스니펫 ID: {result['id']} | {result['date']}", flush=True)
@@ -241,7 +382,18 @@ def _paragraph_block(text: str = "") -> dict:
     }}
 
 
+POLISH_CHECKBOX_TEXT = "AI 제안"
+
 DAILY_TEMPLATE = [
+    # 체크박스: 체크하면 Gemini가 내용을 정형화해서 업로드
+    {
+        "object": "block",
+        "type": "to_do",
+        "to_do": {
+            "rich_text": [{"type": "text", "text": {"content": POLISH_CHECKBOX_TEXT}}],
+            "checked": False,
+        },
+    },
     _heading_block(2, "What"),
     _paragraph_block(),
     _heading_block(2, "Why"),
@@ -278,11 +430,13 @@ def watch(interval: int = 60):
     print(f"👀 Watch 모드 시작 (매 {interval//60}분마다 체크, Ctrl+C로 종료)", flush=True)
     print(f"   📅 날짜 기준: KST 오전 {DAY_START_HOUR}시\n", flush=True)
 
-    last_edited           = None
-    last_report_date      = None   # 마지막으로 리포트를 갱신한 날짜
-    last_page_created     = None   # 마지막으로 페이지를 생성한 날짜
-    last_sync_date        = None   # 오전 9시 전날 최종본 동기화한 날짜
-    last_reverse_sync_at  = None   # 마지막 10분 주기 역방향 동기화 시각
+    last_edited              = None
+    last_report_date         = None
+    last_page_created        = None
+    last_sync_date           = None
+    last_reverse_sync_at     = None
+    last_reverse_sync_hash   = None   # 마지막으로 역방향 동기화된 1000.school 내용 해시
+    last_checkbox_state      = False  # 마지막으로 확인한 체크박스 상태
 
     while True:
         try:
@@ -327,35 +481,87 @@ def watch(interval: int = 60):
             if not page_id:
                 print(f"[{_now()}] ⏳ '{title}' 페이지 없음. 대기 중...", flush=True)
             else:
-                edited = get_page_last_edited(page_id)
-                if edited != last_edited:
-                    print(f"[{_now()}] 🔄 변경 감지! 스니펫 업로드 중...", flush=True)
-                    success = run_once()
-                    if success:
-                        last_edited = edited
-                        # 업로드 성공 시에도 리포트 즉시 갱신
-                        print(f"[{_now()}] 📊 AI 감독 리포트 갱신 중...", flush=True)
+                edited                     = get_page_last_edited(page_id)
+                checked, checkbox_block_id = get_polish_checkbox(page_id)
+                did_upload                 = False
+
+                # ① 체크박스가 새로 체크됐을 때 → Gemini polish 후 업로드
+                if checked and not last_checkbox_state:
+                    print(f"[{_now()}] ✨ 체크박스 감지! Gemini 다듬기 후 업로드 중...", flush=True)
+                    did_upload = run_once(polish=True)
+                    if did_upload and checkbox_block_id:
                         try:
-                            report_module.run()
-                            last_report_date = today
-                        except Exception as re:
-                            print(f"[{_now()}] ⚠️  리포트 갱신 실패: {re}", flush=True)
+                            uncheck_polish_checkbox(checkbox_block_id)
+                            print(f"[{_now()}] ☐ 체크박스 자동 해제 완료", flush=True)
+                        except Exception as ce:
+                            print(f"[{_now()}] ⚠️  체크박스 해제 실패: {ce}", flush=True)
+                    last_checkbox_state = False
+                    last_edited = get_page_last_edited(page_id)  # 루프 방지
+
+                # ② 일반 내용 변경 감지
+                elif edited != last_edited:
+                    print(f"[{_now()}] 🔄 변경 감지! 스니펫 업로드 중...", flush=True)
+                    did_upload = run_once(polish=False)
+                    if did_upload:
+                        last_edited         = edited
+                        last_checkbox_state = checked
+
                 else:
+                    last_checkbox_state = checked
                     print(f"[{_now()}] ✓ 변경 없음", flush=True)
 
+                # ③ 업로드 성공 시: 해시 저장 + 리포트 갱신
+                if did_upload:
+                    # 방금 업로드한 내용의 해시를 저장 → 역방향 동기화 루프 방지
+                    # (1000.school에 올라간 내용 = 노션 내용 → 역방향 동기화 불필요)
+                    try:
+                        uploaded_content = get_notion_content(page_id)
+                        last_reverse_sync_hash = _content_hash(uploaded_content)
+                    except Exception:
+                        pass
+
+                    print(f"[{_now()}] 📊 AI 감독 리포트 갱신 중...", flush=True)
+                    try:
+                        report_module.run()
+                        last_report_date = today
+                    except Exception as re_err:
+                        print(f"[{_now()}] ⚠️  리포트 갱신 실패: {re_err}", flush=True)
+
             # ── 10분마다: 1000.school → 오늘 노션 페이지 역방향 동기화 ─────
-            # (변경 감지 이후에 실행해서 루프 방지)
+            # 핵심 로직: 1000.school 내용 해시를 비교해서 실제로 바뀐 경우만 덮어씀
+            # → 노션에서 업로드한 직후엔 해시가 같아서 스킵 (깜빡임 방지)
+            # → 1000.school에서 직접 수정한 경우엔 해시가 달라서 동기화 실행
             REVERSE_SYNC_INTERVAL = 600  # 10분 (초)
+            now_ts = datetime.now()
             if last_reverse_sync_at is None or \
-               (datetime.now() - last_reverse_sync_at).total_seconds() >= REVERSE_SYNC_INTERVAL:
+               (now_ts - last_reverse_sync_at).total_seconds() >= REVERSE_SYNC_INTERVAL:
+
+                last_reverse_sync_at = now_ts  # 타이머 항상 리셋
+
                 try:
-                    sync_module.main(update_existing=True, only_date=title)
-                    last_reverse_sync_at = datetime.now()
-                    print(f"[{_now()}] 🔁 1000.school → 노션 동기화 완료 ({title})", flush=True)
-                    # 역방향 동기화 후 last_edited 갱신 → 다음 루프에서 루프 방지
-                    page_id = find_today_child_page(NOTION_PAGE_ID)
-                    if page_id:
-                        last_edited = get_page_last_edited(page_id)
+                    # 1000.school에서 오늘 스니펫 내용 확인
+                    school_headers = {"Authorization": f"Bearer {SCHOOL_API_KEY}"}
+                    school_snippet = get_today_snippet(school_headers)
+
+                    if school_snippet:
+                        school_content = school_snippet.get("content", "") or ""
+                        school_hash = _content_hash(school_content)
+
+                        if school_hash != last_reverse_sync_hash:
+                            # 내용이 달라졌을 때만 노션 업데이트 (실제 변경된 경우)
+                            print(f"[{_now()}] 🔁 1000.school 내용 변경 감지 → 노션 업데이트 중... ({title})", flush=True)
+                            sync_module.main(update_existing=True, only_date=title)
+                            last_reverse_sync_hash = school_hash
+                            print(f"[{_now()}] ✅ 역방향 동기화 완료 ({title})", flush=True)
+                            # last_edited 갱신 → 다음 루프에서 업로드 루프 방지
+                            page_id_tmp = find_today_child_page(NOTION_PAGE_ID)
+                            if page_id_tmp:
+                                last_edited = get_page_last_edited(page_id_tmp)
+                        else:
+                            print(f"[{_now()}] ✓ 1000.school 내용 동일 → 역방향 동기화 스킵", flush=True)
+                    else:
+                        print(f"[{_now()}] ℹ️  오늘 스니펫 없음 → 역방향 동기화 스킵", flush=True)
+
                 except Exception as se:
                     print(f"[{_now()}] ⚠️  역방향 동기화 실패: {se}", flush=True)
 
@@ -369,12 +575,51 @@ def _now() -> str:
     return kst_now().strftime("%H:%M:%S")
 
 
+def _content_hash(text: str) -> str:
+    """텍스트 내용의 해시 반환 (공백 정규화 후 비교용)"""
+    normalized = " ".join(text.split())
+    return hashlib.md5(normalized.encode()).hexdigest()
+
+
+def make_template():
+    """
+    오늘 날짜 노션 페이지에 데일리 템플릿 추가
+    - 페이지 없으면 새로 생성 (템플릿 포함)
+    - 페이지 있으면 맨 위에 템플릿 블록 추가
+    """
+    today = effective_date()
+    title = today.strftime("%Y-%m-%d")
+    print(f"📄 '{title}' 페이지 템플릿 설정 중...")
+
+    page_id = find_today_child_page(NOTION_PAGE_ID)
+
+    if not page_id:
+        # 페이지 없으면 새로 생성
+        page_id = create_today_notion_page(title)
+        if page_id:
+            print(f"✅ '{title}' 페이지 새로 생성 + 템플릿 완료!")
+        else:
+            print("❌ 페이지 생성 실패")
+    else:
+        # 페이지 있으면 기존 블록 확인 후 템플릿 추가
+        existing = notion.blocks.children.list(block_id=page_id, page_size=5)
+        if existing["results"]:
+            print(f"⚠️  '{title}' 페이지에 이미 내용이 있어요.")
+            answer = input("기존 내용 위에 템플릿을 추가할까요? (y/n): ").strip().lower()
+            if answer != "y":
+                print("취소됐어요.")
+                return
+        notion.blocks.children.append(block_id=page_id, children=DAILY_TEMPLATE)
+        print(f"✅ '{title}' 페이지에 템플릿 추가 완료!")
+
+
 if __name__ == "__main__":
     if "--watch" in sys.argv:
         watch()
     elif "--report" in sys.argv:
-        # 리포트만 단독 실행
         report_module.run()
+    elif "--template" in sys.argv:
+        make_template()
     else:
         today = effective_date()
         title = today.strftime("%Y-%m-%d")
