@@ -510,22 +510,14 @@ def watch(interval: int = 60):
                     last_checkbox_state = checked
                     print(f"[{_now()}] ✓ 변경 없음", flush=True)
 
-                # ③ 업로드 성공 시: 해시 저장 + 리포트 갱신
+                # ③ 업로드 성공 시: 해시 저장 (루프 방지용)
                 if did_upload:
                     # 방금 업로드한 내용의 해시를 저장 → 역방향 동기화 루프 방지
-                    # (1000.school에 올라간 내용 = 노션 내용 → 역방향 동기화 불필요)
                     try:
                         uploaded_content = get_notion_content(page_id)
                         last_reverse_sync_hash = _content_hash(uploaded_content)
                     except Exception:
                         pass
-
-                    print(f"[{_now()}] 📊 AI 감독 리포트 갱신 중...", flush=True)
-                    try:
-                        report_module.run()
-                        last_report_date = today
-                    except Exception as re_err:
-                        print(f"[{_now()}] ⚠️  리포트 갱신 실패: {re_err}", flush=True)
 
             # ── 10분마다: 1000.school → 노션 역방향 동기화 ─────────────────
             # 해시 비교 방식: 1000.school 내용(+피드백)이 실제로 바뀐 경우만 노션 덮어씀
