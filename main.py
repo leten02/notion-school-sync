@@ -3,7 +3,7 @@ Notion 페이지 → 1000.school 일간 스니펫 자동 작성
 
 사용법:
   python main.py          # 한 번만 실행
-  python main.py --watch  # 30초마다 자동 체크 (변경 시에만 업로드)
+  python main.py --watch  # 10분마다 자동 체크 (변경 감지 시 Gemini 다듬기 후 업로드)
 
 노션 구조:
   부모 페이지 (NOTION_PAGE_ID)
@@ -167,39 +167,6 @@ def _parse_blocks(blocks: list) -> str:
 def _rich_text(rich_text: list) -> str:
     return "".join(t.get("plain_text", "") for t in rich_text)
 
-
-# ─── 체크박스 감지 ───────────────────────────────────────────────────────────
-
-def get_polish_checkbox(page_id: str) -> tuple[bool, str | None]:
-    """
-    페이지 전체 블록을 뒤져서 'AI 제안' 체크박스 상태와 블록 ID 반환
-    returns: (checked, block_id)
-    """
-    cursor = None
-    while True:
-        resp = notion.blocks.children.list(
-            block_id=page_id, start_cursor=cursor, page_size=100
-        )
-        for block in resp["results"]:
-            if block.get("type") == "to_do":
-                text = _rich_text(block["to_do"].get("rich_text", []))
-                if POLISH_CHECKBOX_TEXT in text or "Gemini" in text or "다듬기" in text:
-                    print(f"   🔍 체크박스 발견: '{text}' | checked={block['to_do']['checked']}", flush=True)
-                    return block["to_do"]["checked"], block["id"]
-        if not resp.get("has_more"):
-            break
-        cursor = resp["next_cursor"]
-
-    print(f"   🔍 체크박스 없음 ('{POLISH_CHECKBOX_TEXT}' 블록을 찾지 못함)", flush=True)
-    return False, None
-
-
-def uncheck_polish_checkbox(block_id: str):
-    """polish 완료 후 체크박스를 다시 해제"""
-    notion.blocks.update(
-        block_id=block_id,
-        to_do={"checked": False},
-    )
 
 
 # ─── Gemini Polish (노션 메모 → 정형화된 스니펫) ─────────────────────────────
@@ -392,18 +359,7 @@ def _paragraph_block(text: str = "") -> dict:
     }}
 
 
-POLISH_CHECKBOX_TEXT = "AI 제안"
-
 DAILY_TEMPLATE = [
-    # 체크박스: 체크하면 Gemini가 내용을 정형화해서 업로드
-    {
-        "object": "block",
-        "type": "to_do",
-        "to_do": {
-            "rich_text": [{"type": "text", "text": {"content": POLISH_CHECKBOX_TEXT}}],
-            "checked": False,
-        },
-    },
     _heading_block(2, "What"),
     _paragraph_block(),
     _heading_block(2, "Why"),
@@ -435,18 +391,17 @@ def create_today_notion_page(title: str) -> str | None:
         return None
 
 
-def watch(interval: int = 60):
+def watch(interval: int = 600):
     """interval초마다 노션 변경 감지 후 자동 업로드 + 리포트 갱신"""
     print(f"👀 Watch 모드 시작 (매 {interval//60}분마다 체크, Ctrl+C로 종료)", flush=True)
     print(f"   📅 날짜 기준: KST 오전 {DAY_START_HOUR}시\n", flush=True)
 
-    last_edited              = None
-    last_report_date         = None
-    last_page_created        = None
-    last_sync_date           = None
-    last_reverse_sync_at     = None
-    last_reverse_sync_hash   = None   # 마지막으로 역방향 동기화된 1000.school 내용 해시
-    last_checkbox_state      = False  # 마지막으로 확인한 체크박스 상태
+    last_edited            = None
+    last_report_date       = None
+    last_page_created      = None
+    last_sync_date         = None
+    last_reverse_sync_at   = None
+    last_reverse_sync_hash = None   # 마지막으로 역방향 동기화된 1000.school 내용 해시
 
     while True:
         try:
@@ -485,44 +440,25 @@ def watch(interval: int = 60):
                 except Exception as re:
                     print(f"[{_now()}] ⚠️  리포트 갱신 실패: {re}", flush=True)
 
-            # ── 노션 변경 감지 후 스니펫 업로드 ─────────────────────────────
+            # ── 노션 변경 감지 후 Gemini 다듬기 + 스니펫 업로드 ──────────────
             page_id = find_today_child_page(NOTION_PAGE_ID)
 
             if not page_id:
                 print(f"[{_now()}] ⏳ '{title}' 페이지 없음. 대기 중...", flush=True)
             else:
-                edited                     = get_page_last_edited(page_id)
-                checked, checkbox_block_id = get_polish_checkbox(page_id)
-                did_upload                 = False
+                edited     = get_page_last_edited(page_id)
+                did_upload = False
 
-                # ① 체크박스가 새로 체크됐을 때 → Gemini polish 후 업로드
-                if checked and not last_checkbox_state:
-                    print(f"[{_now()}] ✨ 체크박스 감지! Gemini 다듬기 후 업로드 중...", flush=True)
+                if edited != last_edited:
+                    print(f"[{_now()}] 🔄 변경 감지! Gemini 다듬기 후 업로드 중...", flush=True)
                     did_upload = run_once(polish=True)
-                    if did_upload and checkbox_block_id:
-                        try:
-                            uncheck_polish_checkbox(checkbox_block_id)
-                            print(f"[{_now()}] ☐ 체크박스 자동 해제 완료", flush=True)
-                        except Exception as ce:
-                            print(f"[{_now()}] ⚠️  체크박스 해제 실패: {ce}", flush=True)
-                    last_checkbox_state = False
-                    last_edited = get_page_last_edited(page_id)  # 루프 방지
-
-                # ② 일반 내용 변경 감지
-                elif edited != last_edited:
-                    print(f"[{_now()}] 🔄 변경 감지! 스니펫 업로드 중...", flush=True)
-                    did_upload = run_once(polish=False)
                     if did_upload:
-                        last_edited         = edited
-                        last_checkbox_state = checked
-
+                        last_edited = edited
                 else:
-                    last_checkbox_state = checked
                     print(f"[{_now()}] ✓ 변경 없음", flush=True)
 
-                # ③ 업로드 성공 시: 해시 저장 (루프 방지용)
+                # 업로드 성공 시: 해시 저장 (역방향 동기화 루프 방지)
                 if did_upload:
-                    # 방금 업로드한 내용의 해시를 저장 → 역방향 동기화 루프 방지
                     try:
                         uploaded_content = get_notion_content(page_id)
                         last_reverse_sync_hash = _content_hash(uploaded_content)
