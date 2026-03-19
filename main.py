@@ -527,10 +527,10 @@ def watch(interval: int = 60):
                     except Exception as re_err:
                         print(f"[{_now()}] ⚠️  리포트 갱신 실패: {re_err}", flush=True)
 
-            # ── 10분마다: 1000.school → 오늘 노션 페이지 역방향 동기화 ─────
-            # 핵심 로직: 1000.school 내용 해시를 비교해서 실제로 바뀐 경우만 덮어씀
-            # → 노션에서 업로드한 직후엔 해시가 같아서 스킵 (깜빡임 방지)
-            # → 1000.school에서 직접 수정한 경우엔 해시가 달라서 동기화 실행
+            # ── 10분마다: 양방향 동기화 ──────────────────────────────────────
+            # 순서: ① 노션 → 1000.school (현재 노션 내용 먼저 보존)
+            #        ② 1000.school → 노션 (피드백·외부 수정 반영, 해시 비교)
+            # → 노션 작성 내용이 역방향으로 덮어쓰여서 유실되는 문제 방지
             REVERSE_SYNC_INTERVAL = 600  # 10분 (초)
             now_ts = datetime.now()
             if last_reverse_sync_at is None or \
@@ -539,17 +539,35 @@ def watch(interval: int = 60):
                 last_reverse_sync_at = now_ts  # 타이머 항상 리셋
 
                 try:
-                    # 1000.school에서 오늘 스니펫 내용 확인
                     school_headers = {"Authorization": f"Bearer {SCHOOL_API_KEY}"}
+
+                    # ① 노션 → 1000.school: 현재 노션 내용 먼저 업로드 (내용 보존)
+                    if page_id:
+                        notion_content_now = get_notion_content(page_id)
+                        if notion_content_now.strip():
+                            print(f"[{_now()}] 📤 역방향 동기화 전 노션 → 1000.school 업로드 중...", flush=True)
+                            try:
+                                save_snippet(notion_content_now)
+                                last_edited = get_page_last_edited(page_id)  # 루프 방지
+                                last_reverse_sync_hash = _content_hash(notion_content_now)
+                                print(f"[{_now()}] ✅ 사전 업로드 완료", flush=True)
+                            except Exception as pre_e:
+                                print(f"[{_now()}] ⚠️  사전 업로드 실패 (계속 진행): {pre_e}", flush=True)
+
+                    # ② 1000.school → 노션: 해시 비교 후 다를 때만 덮어씀
+                    #    (피드백 추가·외부 수정 등 school 측 변경사항 반영)
                     school_snippet = get_today_snippet(school_headers)
 
                     if school_snippet:
-                        school_content = school_snippet.get("content", "") or ""
-                        school_hash = _content_hash(school_content)
+                        school_content  = school_snippet.get("content", "") or ""
+                        school_feedback = school_snippet.get("feedback") or ""
+                        if isinstance(school_feedback, dict):
+                            school_feedback = json.dumps(school_feedback, ensure_ascii=False)
+                        # content + feedback 합산 해시 → 피드백 변경도 감지
+                        school_hash = _content_hash(school_content + school_feedback)
 
                         if school_hash != last_reverse_sync_hash:
-                            # 내용이 달라졌을 때만 노션 업데이트 (실제 변경된 경우)
-                            print(f"[{_now()}] 🔁 1000.school 내용 변경 감지 → 노션 업데이트 중... ({title})", flush=True)
+                            print(f"[{_now()}] 🔁 1000.school 변경 감지 → 노션 업데이트 중... ({title})", flush=True)
                             sync_module.main(update_existing=True, only_date=title)
                             last_reverse_sync_hash = school_hash
                             print(f"[{_now()}] ✅ 역방향 동기화 완료 ({title})", flush=True)
@@ -563,7 +581,7 @@ def watch(interval: int = 60):
                         print(f"[{_now()}] ℹ️  오늘 스니펫 없음 → 역방향 동기화 스킵", flush=True)
 
                 except Exception as se:
-                    print(f"[{_now()}] ⚠️  역방향 동기화 실패: {se}", flush=True)
+                    print(f"[{_now()}] ⚠️  동기화 실패: {se}", flush=True)
 
         except Exception as e:
             print(f"[{_now()}] ⚠️  오류: {e}", flush=True)
