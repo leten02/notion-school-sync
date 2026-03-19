@@ -172,15 +172,25 @@ def _rich_text(rich_text: list) -> str:
 
 def get_polish_checkbox(page_id: str) -> tuple[bool, str | None]:
     """
-    페이지에서 'Gemini로 다듬기' 체크박스 상태와 블록 ID 반환
+    페이지 전체 블록을 뒤져서 'AI 제안' 체크박스 상태와 블록 ID 반환
     returns: (checked, block_id)
     """
-    resp = notion.blocks.children.list(block_id=page_id, page_size=20)
-    for block in resp["results"]:
-        if block.get("type") == "to_do":
-            text = _rich_text(block["to_do"].get("rich_text", []))
-            if POLISH_CHECKBOX_TEXT in text or "Gemini" in text or "다듬기" in text:
-                return block["to_do"]["checked"], block["id"]
+    cursor = None
+    while True:
+        resp = notion.blocks.children.list(
+            block_id=page_id, start_cursor=cursor, page_size=100
+        )
+        for block in resp["results"]:
+            if block.get("type") == "to_do":
+                text = _rich_text(block["to_do"].get("rich_text", []))
+                if POLISH_CHECKBOX_TEXT in text or "Gemini" in text or "다듬기" in text:
+                    print(f"   🔍 체크박스 발견: '{text}' | checked={block['to_do']['checked']}", flush=True)
+                    return block["to_do"]["checked"], block["id"]
+        if not resp.get("has_more"):
+            break
+        cursor = resp["next_cursor"]
+
+    print(f"   🔍 체크박스 없음 ('{POLISH_CHECKBOX_TEXT}' 블록을 찾지 못함)", flush=True)
     return False, None
 
 
