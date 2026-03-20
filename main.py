@@ -3,7 +3,7 @@ Notion 페이지 → 1000.school 일간 스니펫 자동 작성
 
 사용법:
   python main.py          # 한 번만 실행
-  python main.py --watch  # 10분마다 자동 체크 (변경 감지 시 Gemini 다듬기 후 업로드)
+  python main.py --watch  # 10분마다 자동 체크 (변경 → 원문 즉시 업로드, Tomorrow+30분 → Gemini polish)
 
 노션 구조:
   부모 페이지 (NOTION_PAGE_ID)
@@ -11,6 +11,7 @@ Notion 페이지 → 1000.school 일간 스니펫 자동 작성
 """
 
 import os
+import re
 import sys
 import time
 import json
@@ -443,15 +444,18 @@ def watch(interval: int = 600):
     print(f"👀 Watch 모드 시작 (매 {interval//60}분마다 체크, Ctrl+C로 종료)", flush=True)
     print(f"   📅 날짜 기준: KST 오전 {DAY_START_HOUR}시\n", flush=True)
 
-    last_edited            = None
-    last_report_date       = None
-    last_page_created      = None
-    last_sync_date         = None
-    last_reverse_sync_at   = None
-    last_reverse_sync_hash = None   # 마지막으로 역방향 동기화된 1000.school 내용 해시
-    last_tracked_date      = None   # 날짜 변경 감지용
+    last_edited             = None
+    last_report_date        = None
+    last_page_created       = None
+    last_sync_date          = None
+    last_reverse_sync_at    = None
+    last_reverse_sync_hash  = None   # 마지막으로 역방향 동기화된 1000.school 내용 해시
+    last_tracked_date       = None   # 날짜 변경 감지용
+    last_change_detected_at = None   # 마지막 노션 변경 감지 시각 (polish 타이밍 계산용)
+    polish_done_date        = None   # 해당 날짜 polish 완료 여부 (중복 방지)
 
     REVERSE_SYNC_INTERVAL = 600  # 10분 (초)
+    POLISH_WAIT_MIN       = 30   # Tomorrow 섹션 감지 후 polish까지 대기 분
 
     while True:
         try:
@@ -460,11 +464,12 @@ def watch(interval: int = 600):
             title = today.strftime("%Y-%m-%d")
 
             # ── 날짜가 바뀌면 상태 리셋 ──────────────────────────────────────
-            # last_edited를 리셋하지 않으면 새 날짜 페이지를 매 루프마다 업로드 시도함
             if today != last_tracked_date:
-                last_edited            = None
-                last_reverse_sync_hash = None
-                last_tracked_date      = today
+                last_edited             = None
+                last_reverse_sync_hash  = None
+                last_change_detected_at = None  # 새 날 변경 감지 초기화
+                polish_done_date        = None  # 새 날 polish 가능하도록
+                last_tracked_date       = today
 
             # ── 오늘 페이지 한 번만 조회 (루프당 API 1번으로 절약) ───────────
             page_id = find_today_child_page(NOTION_PAGE_ID)
@@ -503,23 +508,51 @@ def watch(interval: int = 600):
                 except Exception as re_err:
                     print(f"[{_now()}] ⚠️  리포트 갱신 실패: {re_err}", flush=True)
 
-            # ── 노션 변경 감지 후 Gemini 다듬기 + 스니펫 업로드 ──────────────
+            # ── 노션 변경 감지 → 원문 즉시 업로드 ───────────────────────────
             if not page_id:
                 print(f"[{_now()}] ⏳ '{title}' 페이지 없음. 대기 중...", flush=True)
             else:
-                edited     = get_page_last_edited(page_id)
-                did_upload = False
+                edited = get_page_last_edited(page_id)
 
                 if edited != last_edited:
-                    print(f"[{_now()}] 🔄 변경 감지! Gemini 다듬기 후 업로드 중...", flush=True)
-                    uploaded_content = run_once(polish=True)
+                    print(f"[{_now()}] 🔄 변경 감지! 원문 업로드 중...", flush=True)
+                    uploaded_content = run_once(polish=False)
                     if uploaded_content is not None:
-                        last_edited = edited
-                        # 실제 업로드된 내용(Gemini 다듬기 결과)으로 해시 저장
-                        # → 역방향 동기화 시 "이미 반영된 내용"으로 인식해 덮어쓰기 방지
-                        last_reverse_sync_hash = _content_hash(uploaded_content)
+                        last_edited             = edited
+                        last_change_detected_at = now   # 변경 시각 기록
+                        last_reverse_sync_hash  = _content_hash(uploaded_content)
                 else:
                     print(f"[{_now()}] ✓ 변경 없음", flush=True)
+
+            # ── Gemini Polish 조건 체크 ──────────────────────────────────
+            # 조건 1: Tomorrow 섹션 있음 + 30분 무변경 → polish (작성 완료 판단)
+            # 조건 2: 8:50~8:59 폴백 → Tomorrow 못 적어도 9시 전에 강제 polish
+            if page_id and polish_done_date != today and last_change_detected_at:
+                minutes_since = (now - last_change_detected_at).total_seconds() / 60
+                should_polish = False
+                polish_reason = ""
+
+                if minutes_since >= POLISH_WAIT_MIN:
+                    has_tmr, _ = _has_tomorrow_content(page_id)
+                    if has_tmr:
+                        should_polish = True
+                        polish_reason = f"Tomorrow 섹션 확인 + {POLISH_WAIT_MIN}분 경과"
+
+                if not should_polish and now.hour == 8 and now.minute >= 50:
+                    should_polish = True
+                    polish_reason = "8:50 폴백 (Tomorrow 미입력 대비 강제 polish)"
+
+                if should_polish:
+                    print(f"[{_now()}] ✨ Gemini Polish 시작 ({polish_reason})", flush=True)
+                    polished = run_once(polish=True)
+                    if polished is not None:
+                        polish_done_date       = today
+                        last_reverse_sync_hash = _content_hash(polished)
+                        try:
+                            last_edited = get_page_last_edited(page_id)  # 루프 방지
+                        except Exception:
+                            pass
+                        print(f"[{_now()}] ✅ Polish 완료 — 오늘 추가 polish 없음", flush=True)
 
             # ── 10분마다: 1000.school → 노션 역방향 동기화 ─────────────────
             # 해시 비교로 실제 변경된 경우만 덮어씀 (깜빡임 방지)
@@ -570,6 +603,20 @@ def _content_hash(text: str) -> str:
     """텍스트 내용의 해시 반환 (공백 정규화 후 비교용)"""
     normalized = " ".join(text.split())
     return hashlib.md5(normalized.encode()).hexdigest()
+
+
+def _has_tomorrow_content(page_id: str) -> tuple[bool, str]:
+    """
+    Tomorrow / 내일 섹션에 실제 내용이 있는지 확인.
+    반환: (내용 있음 여부, 전체 content 문자열)
+    content도 같이 반환해서 호출 측에서 재사용 가능하게.
+    """
+    content = get_notion_content(page_id)
+    pattern = r'#+[^\n]*(?:Tomorrow|내일)[^\n]*\n(.*?)(?=\n#+|\Z)'
+    m = re.search(pattern, content, re.DOTALL | re.IGNORECASE)
+    if m and m.group(1) and m.group(1).strip():
+        return True, content
+    return False, content
 
 
 def make_template():
