@@ -475,7 +475,11 @@ def watch(interval: int = 600):
                     page_id = create_today_notion_page(title)
                     if page_id:
                         print(f"[{_now()}] ✅ '{title}' 페이지 생성 완료", flush=True)
-                last_page_created = today
+                        last_page_created = today  # 성공했을 때만 저장 (실패 시 다음 루프에서 재시도)
+                    else:
+                        print(f"[{_now()}] ⚠️  페이지 생성 실패 → 다음 루프에서 재시도", flush=True)
+                else:
+                    last_page_created = today  # 페이지가 이미 존재하면 생성 불필요
 
             # ── 오전 9시 이후 하루 1번: 전날 스니펫 최종본 → 노션 반영 ────────
             if now.hour >= DAY_START_HOUR and last_sync_date != today:
@@ -520,7 +524,7 @@ def watch(interval: int = 600):
 
             # ── 10분마다: 1000.school → 노션 역방향 동기화 ─────────────────
             # 해시 비교로 실제 변경된 경우만 덮어씀 (깜빡임 방지)
-            now_ts = datetime.now()
+            now_ts = now  # kst_now() 결과 재사용 (datetime.now() 혼용 방지)
             if last_reverse_sync_at is None or \
                (now_ts - last_reverse_sync_at).total_seconds() >= REVERSE_SYNC_INTERVAL:
 
