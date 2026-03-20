@@ -279,20 +279,52 @@ notion-school-sync/
 │                         스니펫 저장·조회, 섹션 추출, 달성률 계산
 │
 ├── requirements.txt
-└── .env               ← 환경 변수 (비공개, git 제외)
+├── .env.example       ← 환경 변수 템플릿 (이걸 복사해서 .env 만들기)
+├── setup.sh           ← 클론 후 한 번에 세팅하는 스크립트
+└── .env               ← 환경 변수 실제값 (비공개, git 제외)
 ```
 
 ---
 
-## 설치 및 설정
-
-### 1. 의존성 설치
+## 팀원 빠른 시작 (클론 후 3단계)
 
 ```bash
+# 1. 클론
+git clone https://github.com/leten02/notion-school-sync.git
+cd notion-school-sync
+
+# 2. 자동 세팅 (가상환경 + 패키지 + DB 초기화 한 번에)
+bash setup.sh
+
+# 3. .env 파일에 API 키 입력
+nano .env   # 또는 open .env
+```
+
+세팅 완료 후 실행:
+```bash
+source venv/bin/activate
+python main.py --watch
+```
+
+---
+
+## 설치 및 설정 (수동)
+
+### 1. 가상환경 생성 및 의존성 설치
+
+```bash
+python3 -m venv venv
+source venv/bin/activate      # Windows: venv\Scripts\activate
 pip install -r requirements.txt
 ```
 
-### 2. 환경 변수 설정 (`.env`)
+### 2. 환경 변수 설정
+
+`.env.example` 을 복사해서 `.env` 로 저장하고 값을 채웁니다.
+
+```bash
+cp .env.example .env
+```
 
 ```env
 NOTION_TOKEN=secret_xxxx       # 노션 Integration 토큰
@@ -301,12 +333,19 @@ SCHOOL_API_KEY=I_wrdo_xxxx     # 1000.school API 키
 GEMINI_API_KEY=AIzaSy_xxxx     # Gemini API 키
 ```
 
-**노션 Integration 설정 방법**
-1. [notion.so/my-integrations](https://www.notion.so/my-integrations) → Integration 생성
-2. 부모 페이지 우측 상단 `···` → **연결** → Integration 추가
+**노션 NOTION_PAGE_ID 찾는 방법**
+```
+노션 부모 페이지 열기
+→ 주소창: notion.so/abc123def456ghi789...
+→ 마지막 32자리가 PAGE_ID (하이픈 없이 입력)
+```
 
-**Gemini API 키 발급**
-- [aistudio.google.com/app/apikey](https://aistudio.google.com/app/apikey) (무료)
+**노션 Integration 연결 방법**
+1. [notion.so/my-integrations](https://www.notion.so/my-integrations) → Integration 생성
+2. 부모 페이지 우측 상단 `···` → **연결** → 생성한 Integration 선택
+
+**Gemini API 키 발급** (무료)
+- [aistudio.google.com/app/apikey](https://aistudio.google.com/app/apikey)
 
 ### 3. DB 초기화
 
