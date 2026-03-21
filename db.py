@@ -1,45 +1,107 @@
 """
-SQLite DB 관리
+데이터 저장소 어댑터
 
-테이블:
-  snippets   - 1000.school 스니펫 원본 + 추출된 구조화 데이터
-  analysis   - Gemini 분석 결과 (리포트)
+기본: SQLite (기존 단일 사용자 스크립트 호환)
+백엔드 스케줄러 모드: Supabase snippets/analysis 테이블 사용
 """
 
 import sqlite3
 import json
 import re
 import os
-from datetime import datetime
+from datetime import datetime, timezone
 
-DB_PATH = os.path.join(os.path.dirname(__file__), "snippets.db")
+import requests
+
+DB_PATH = os.getenv("SNIPPETS_DB_PATH") or os.path.join(os.path.dirname(__file__), "snippets.db")
+USE_SUPABASE_SNIPPETS = os.getenv("USE_SUPABASE_SNIPPETS", "").lower() in {"1", "true", "yes", "on"}
+
+
+def _utc_now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _require_current_user_id() -> str:
+    user_id = os.getenv("CURRENT_USER_ID", "").strip()
+    if not user_id:
+        raise RuntimeError("CURRENT_USER_ID is required when USE_SUPABASE_SNIPPETS is enabled.")
+    return user_id
+
+
+def _supabase_base_url() -> str:
+    url = os.getenv("SUPABASE_URL", "").strip()
+    if not url:
+        raise RuntimeError("SUPABASE_URL is missing.")
+    return url.rstrip("/")
+
+
+def _supabase_key() -> str:
+    # write/query 안정성을 위해 서비스 롤 우선 사용
+    key = os.getenv("SUPABASE_SERVICE_ROLE_KEY", "").strip() or os.getenv("SUPABASE_ANON_KEY", "").strip()
+    if not key:
+        raise RuntimeError("SUPABASE_SERVICE_ROLE_KEY or SUPABASE_ANON_KEY is required.")
+    return key
+
+
+def _supabase_request(
+    method: str,
+    table: str,
+    *,
+    params: dict | None = None,
+    json_body=None,
+    prefer: str | None = None,
+):
+    headers = {
+        "apikey": _supabase_key(),
+        "Authorization": f"Bearer {_supabase_key()}",
+    }
+    if json_body is not None:
+        headers["Content-Type"] = "application/json"
+    if prefer:
+        headers["Prefer"] = prefer
+
+    resp = requests.request(
+        method=method.upper(),
+        url=f"{_supabase_base_url()}/rest/v1/{table}",
+        headers=headers,
+        params=params,
+        json=json_body,
+        timeout=30,
+    )
+    if not resp.ok:
+        raise RuntimeError(f"Supabase {method} {table} failed: {resp.status_code} {resp.text[:500]}")
+    if not resp.text.strip():
+        return None
+    try:
+        return resp.json()
+    except Exception:
+        return resp.text
 
 
 def get_conn() -> sqlite3.Connection:
     conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row  # dict처럼 접근 가능
+    conn.row_factory = sqlite3.Row
     return conn
 
 
 def init_db():
-    """DB 테이블 초기화 (없으면 생성)"""
+    """DB 테이블 초기화 (Supabase 모드에서는 no-op)"""
+    if USE_SUPABASE_SNIPPETS:
+        return
     conn = get_conn()
     conn.executescript("""
         CREATE TABLE IF NOT EXISTS snippets (
-            id              INTEGER PRIMARY KEY,   -- 1000.school snippet id
-            date            TEXT UNIQUE NOT NULL,  -- "2026-03-18"
+            id              INTEGER PRIMARY KEY,
+            date            TEXT UNIQUE NOT NULL,
             content         TEXT,
-            feedback_raw    TEXT,                  -- 원본 JSON 문자열
-
-            -- 추출된 구조화 데이터
-            health_score    REAL,                  -- 헬스 체크 점수 (0~10)
-            feedback_score  INTEGER,               -- 피드백 총점 (0~100)
-            highlights      TEXT,                  -- 하이라이트 텍스트
-            lowlights       TEXT,                  -- 로우라이트 텍스트
-            tomorrow_goals  TEXT,                  -- 내일의 우선순위
-            team_mentions   TEXT,                  -- 팀 관련 언급
-            learnings       TEXT,                  -- 오늘의 배움
-
+            feedback_raw    TEXT,
+            health_score    REAL,
+            feedback_score  INTEGER,
+            highlights      TEXT,
+            lowlights       TEXT,
+            tomorrow_goals  TEXT,
+            team_mentions   TEXT,
+            learnings       TEXT,
             created_at      TEXT,
             updated_at      TEXT,
             synced_at       TEXT DEFAULT (datetime('now'))
@@ -48,9 +110,7 @@ def init_db():
         CREATE TABLE IF NOT EXISTS analysis (
             id              INTEGER PRIMARY KEY AUTOINCREMENT,
             created_at      TEXT DEFAULT (datetime('now')),
-            snippet_count   INTEGER,               -- 분석에 사용된 스니펫 수
-
-            -- 7개 지표 (0~100 점수)
+            snippet_count   INTEGER,
             burnout_risk        INTEGER,
             team_health         INTEGER,
             diligence           INTEGER,
@@ -58,15 +118,12 @@ def init_db():
             growth              INTEGER,
             execution           INTEGER,
             emotional_energy    INTEGER,
-
-            -- 상세 분석 JSON
-            details_json    TEXT,   -- 각 지표별 이유, 근거 날짜 등
-            alert_days      TEXT,   -- 주의 필요 날짜 JSON
-            improvement_areas TEXT, -- 개선 필요 영역 JSON
-            positive_trends TEXT,   -- 긍정 변화 JSON
-            overall_summary TEXT,   -- 전체 흐름 요약
-
-            notion_page_id  TEXT    -- 업데이트된 노션 페이지 ID
+            details_json    TEXT,
+            alert_days      TEXT,
+            improvement_areas TEXT,
+            positive_trends TEXT,
+            overall_summary TEXT,
+            notion_page_id  TEXT
         );
     """)
     conn.commit()
@@ -76,27 +133,18 @@ def init_db():
 # ─── 스니펫 저장 ──────────────────────────────────────────────────────────────
 
 def extract_health_score(content: str) -> float | None:
-    """
-    헬스 체크 점수 추출
-    '#### 헬스 체크 (10점)' 섹션 이후 줄에서 실제 점수를 찾음
-    예: '- 6/10', '- 2/10 (수면 부족)', '- (6점)', '- 8점'
-    """
     if not content:
         return None
 
-    # '헬스 체크' 섹션 이후 텍스트만 추출
     m = re.search(r'헬스\s*체크[^\n]*\n(.*?)(?=\n#+\s|\Z)', content, re.DOTALL | re.IGNORECASE)
     if not m:
         return None
-
-    section = m.group(1)  # 헬스 체크 이후 내용 (제목 제외)
-
-    # 섹션 내에서 점수 패턴 탐색 (0~10 사이 숫자)
+    section = m.group(1)
     patterns = [
-        r'[-•]\s*(\d+(?:\.\d+)?)\s*/\s*10',   # - 6/10
-        r'\((\d+(?:\.\d+)?)\s*점\)',            # (6점)
-        r'[-•]\s*(\d+(?:\.\d+)?)\s*점',         # - 6점
-        r'(\d+(?:\.\d+)?)\s*/\s*10',            # 6/10 (앞에 - 없어도)
+        r'[-•]\s*(\d+(?:\.\d+)?)\s*/\s*10',
+        r'\((\d+(?:\.\d+)?)\s*점\)',
+        r'[-•]\s*(\d+(?:\.\d+)?)\s*점',
+        r'(\d+(?:\.\d+)?)\s*/\s*10',
     ]
     for pat in patterns:
         hit = re.search(pat, section, re.IGNORECASE)
@@ -108,20 +156,8 @@ def extract_health_score(content: str) -> float | None:
 
 
 def extract_section(content: str, section_name: str) -> str:
-    """특정 섹션 텍스트 추출 (예: '하이라이트', '로우라이트')
-
-    section_name은 정규식 패턴으로 사용됨.
-    - OR 패턴:   "배움|남길 말"  → (?:배움|남길 말) 으로 감싸서 우선순위 오류 방지
-    - 와일드카드: "팀.*기여"      → 헤딩 줄 어디에나 등장해도 매칭
-    - 일반:      "하이라이트"    → 헤딩 줄에 포함되면 매칭
-
-    헤딩 줄 전체에서 section_name을 탐색하므로
-    "## 오늘의 배움 또는 남길 말" 처럼 앞에 수식어가 붙어도 올바르게 추출.
-    """
     if not content:
         return ""
-    # 헤딩 줄(#+로 시작) 어디서든 section_name 패턴이 나오면 매칭
-    # (?:{section_name}) 으로 감싸서 | 연산자를 section_name 내부로 한정
     pattern = rf'#+[^\n]*(?:{section_name})[^\n]*\n(.*?)(?=\n#+\s|\Z)'
     m = re.search(pattern, content, re.DOTALL | re.IGNORECASE)
     if m and m.group(1) is not None:
@@ -129,18 +165,66 @@ def extract_section(content: str, section_name: str) -> str:
     return ""
 
 
-def upsert_snippet(snippet: dict):
-    """스니펫 저장 (있으면 업데이트, 없으면 삽입)"""
+def _extract_feedback_score(feedback_raw) -> int | None:
+    if not feedback_raw:
+        return None
+    try:
+        fb = json.loads(feedback_raw) if isinstance(feedback_raw, str) else feedback_raw
+        return fb.get("total_score")
+    except Exception:
+        return None
+
+
+def _snippet_to_payload(snippet: dict) -> dict:
     content = snippet.get("content", "")
     feedback_raw = snippet.get("feedback")
-    feedback_score = None
-    if feedback_raw:
-        try:
-            fb = json.loads(feedback_raw) if isinstance(feedback_raw, str) else feedback_raw
-            feedback_score = fb.get("total_score")
-        except Exception:
-            pass
+    return {
+        "user_id": _require_current_user_id(),
+        "snippet_date": snippet.get("date"),
+        "source": "1000school",
+        "content": content,
+        "health_score": extract_health_score(content),
+        "feedback_score": _extract_feedback_score(feedback_raw),
+        "highlights": extract_section(content, "하이라이트"),
+        "lowlights": extract_section(content, "로우라이트"),
+        "tomorrow_goals": extract_section(content, "내일의 우선순위"),
+        "team_mentions": extract_section(content, "팀.*기여"),
+        "learnings": extract_section(content, "배움|남길 말"),
+        "external_id": str(snippet.get("id")) if snippet.get("id") is not None else None,
+        "synced_at": _utc_now_iso(),
+    }
 
+
+def _snippet_row_to_legacy(row: dict) -> dict:
+    return {
+        "id": row.get("external_id") or row.get("id"),
+        "date": row.get("snippet_date"),
+        "content": row.get("content"),
+        "health_score": row.get("health_score"),
+        "feedback_score": row.get("feedback_score"),
+        "highlights": row.get("highlights"),
+        "lowlights": row.get("lowlights"),
+        "tomorrow_goals": row.get("tomorrow_goals"),
+        "team_mentions": row.get("team_mentions"),
+        "learnings": row.get("learnings"),
+        "synced_at": row.get("synced_at"),
+    }
+
+
+def upsert_snippet(snippet: dict):
+    if USE_SUPABASE_SNIPPETS:
+        payload = _snippet_to_payload(snippet)
+        _supabase_request(
+            "POST",
+            "snippets",
+            params={"on_conflict": "user_id,snippet_date"},
+            json_body=[payload],
+            prefer="resolution=merge-duplicates,return=minimal",
+        )
+        return
+
+    content = snippet.get("content", "")
+    feedback_raw = snippet.get("feedback")
     conn = get_conn()
     conn.execute("""
         INSERT INTO snippets (
@@ -167,7 +251,7 @@ def upsert_snippet(snippet: dict):
         content,
         feedback_raw if isinstance(feedback_raw, str) else (json.dumps(feedback_raw, ensure_ascii=False) if feedback_raw is not None else None),
         extract_health_score(content),
-        feedback_score,
+        _extract_feedback_score(feedback_raw),
         extract_section(content, "하이라이트"),
         extract_section(content, "로우라이트"),
         extract_section(content, "내일의 우선순위"),
@@ -181,7 +265,18 @@ def upsert_snippet(snippet: dict):
 
 
 def get_all_snippets() -> list[dict]:
-    """전체 스니펫 날짜순 반환"""
+    if USE_SUPABASE_SNIPPETS:
+        rows = _supabase_request(
+            "GET",
+            "snippets",
+            params={
+                "select": "*",
+                "user_id": f"eq.{_require_current_user_id()}",
+                "order": "snippet_date.asc",
+            },
+        ) or []
+        return [_snippet_row_to_legacy(r) for r in rows]
+
     conn = get_conn()
     rows = conn.execute("SELECT * FROM snippets ORDER BY date ASC").fetchall()
     conn.close()
@@ -189,7 +284,19 @@ def get_all_snippets() -> list[dict]:
 
 
 def get_snippets_by_date_range(start_date: str, end_date: str) -> list[dict]:
-    """start_date ~ end_date (포함) 범위의 스니펫 날짜순 반환"""
+    if USE_SUPABASE_SNIPPETS:
+        rows = _supabase_request(
+            "GET",
+            "snippets",
+            params={
+                "select": "*",
+                "user_id": f"eq.{_require_current_user_id()}",
+                "order": "snippet_date.asc",
+            },
+        ) or []
+        filtered = [r for r in rows if start_date <= (r.get("snippet_date") or "") <= end_date]
+        return [_snippet_row_to_legacy(r) for r in filtered]
+
     conn = get_conn()
     rows = conn.execute(
         "SELECT * FROM snippets WHERE date >= ? AND date <= ? ORDER BY date ASC",
@@ -200,6 +307,8 @@ def get_snippets_by_date_range(start_date: str, end_date: str) -> list[dict]:
 
 
 def get_snippet_count() -> int:
+    if USE_SUPABASE_SNIPPETS:
+        return len(get_all_snippets())
     conn = get_conn()
     count = conn.execute("SELECT COUNT(*) FROM snippets").fetchone()[0]
     conn.close()
@@ -209,42 +318,59 @@ def get_snippet_count() -> int:
 # ─── 우선순위 달성률 계산 ─────────────────────────────────────────────────────
 
 def calc_priority_achievement(snippets: list[dict]) -> float:
-    """
-    내일의 우선순위 달성률 계산
-    N일의 '내일 우선순위' 키워드가 N+1일 '오늘 한 일'에 등장하는 비율
-    """
     if len(snippets) < 2:
         return 0.0
 
     achieved = 0
     total = 0
-
     for i in range(len(snippets) - 1):
         goals_text = snippets[i].get("tomorrow_goals", "") or ""
         next_content = snippets[i + 1].get("content", "") or ""
-
         if not goals_text.strip():
             continue
-
-        # 목표 항목 파싱 (- 또는 숫자. 로 시작하는 줄)
         goals = re.findall(r'[-•]\s*(.+)', goals_text)
         if not goals:
             goals = [goals_text]
-
         for goal in goals:
             keywords = [w for w in goal.split() if len(w) > 1][:3]
             if keywords:
                 total += 1
                 if any(kw in next_content for kw in keywords):
                     achieved += 1
-
     return round(achieved / total * 100, 1) if total > 0 else 0.0
 
 
 # ─── 분석 결과 저장/조회 ──────────────────────────────────────────────────────
 
 def save_analysis(result: dict) -> int:
-    """분석 결과 저장, 생성된 row id 반환"""
+    if USE_SUPABASE_SNIPPETS:
+        payload = {
+            "user_id": _require_current_user_id(),
+            "snippet_count": result.get("snippet_count"),
+            "burnout_risk": result.get("burnout_risk"),
+            "team_health": result.get("team_health"),
+            "diligence": result.get("diligence"),
+            "recurrence": result.get("recurrence"),
+            "growth": result.get("growth"),
+            "execution": result.get("execution"),
+            "emotional_energy": result.get("emotional_energy"),
+            "details_json": result.get("details", {}),
+            "alert_days": result.get("alert_days", []),
+            "improvement_areas": result.get("improvement_areas", []),
+            "positive_trends": result.get("positive_trends", []),
+            "overall_summary": result.get("overall_summary", ""),
+            "notion_page_id": result.get("notion_page_id"),
+        }
+        rows = _supabase_request(
+            "POST",
+            "analysis",
+            json_body=[payload],
+            prefer="return=representation",
+        ) or []
+        if not rows:
+            raise RuntimeError("analysis insert succeeded but no row was returned.")
+        return int(rows[0]["id"])
+
     conn = get_conn()
     cur = conn.execute("""
         INSERT INTO analysis (
@@ -277,6 +403,19 @@ def save_analysis(result: dict) -> int:
 
 
 def update_analysis_notion_id(row_id: int, notion_page_id: str):
+    if USE_SUPABASE_SNIPPETS:
+        _supabase_request(
+            "PATCH",
+            "analysis",
+            params={
+                "id": f"eq.{row_id}",
+                "user_id": f"eq.{_require_current_user_id()}",
+            },
+            json_body={"notion_page_id": notion_page_id},
+            prefer="return=minimal",
+        )
+        return
+
     conn = get_conn()
     conn.execute(
         "UPDATE analysis SET notion_page_id = ? WHERE id = ?",
@@ -287,7 +426,26 @@ def update_analysis_notion_id(row_id: int, notion_page_id: str):
 
 
 def get_latest_analysis() -> dict | None:
-    """가장 최근 분석 결과 반환"""
+    if USE_SUPABASE_SNIPPETS:
+        rows = _supabase_request(
+            "GET",
+            "analysis",
+            params={
+                "select": "*",
+                "user_id": f"eq.{_require_current_user_id()}",
+                "order": "created_at.desc",
+                "limit": "1",
+            },
+        ) or []
+        if not rows:
+            return None
+        row = rows[0]
+        # SQLite 반환 형태와 맞추기 위해 json 계열 필드를 문자열화
+        for col in ("details_json", "alert_days", "improvement_areas", "positive_trends"):
+            if col in row and not isinstance(row[col], str):
+                row[col] = json.dumps(row[col], ensure_ascii=False)
+        return row
+
     conn = get_conn()
     row = conn.execute(
         "SELECT * FROM analysis ORDER BY created_at DESC LIMIT 1"
@@ -298,4 +456,7 @@ def get_latest_analysis() -> dict | None:
 
 if __name__ == "__main__":
     init_db()
-    print(f"✅ DB 초기화 완료: {DB_PATH}")
+    if USE_SUPABASE_SNIPPETS:
+        print("✅ Supabase 모드: 로컬 SQLite 초기화 스킵")
+    else:
+        print(f"✅ DB 초기화 완료: {DB_PATH}")

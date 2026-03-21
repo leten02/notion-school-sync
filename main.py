@@ -71,18 +71,12 @@ def get_diary_month_container(year: int, month: int) -> str:
 
 # ─── 노션 오늘 날짜 하위 페이지 찾기 ─────────────────────────────────────────
 
-def find_today_child_page(parent_id: str) -> str | None:
-    """오늘 날짜 하위 페이지 ID를 반환 (월별 컨테이너 안에서 탐색)"""
-    today = effective_date()
-    title = today.strftime("%Y-%m-%d")
-
-    # 이번 달 컨테이너 안에서 탐색
-    month_id = get_diary_month_container(today.year, today.month)
-
+def _find_child_page_by_title(parent_id: str, title: str) -> str | None:
+    """부모 페이지 아래에서 특정 제목의 child_page를 탐색"""
     cursor = None
     while True:
         resp = notion.blocks.children.list(
-            block_id=month_id,
+            block_id=parent_id,
             start_cursor=cursor,
             page_size=100,
         )
@@ -93,8 +87,27 @@ def find_today_child_page(parent_id: str) -> str | None:
         if not resp.get("has_more"):
             break
         cursor = resp["next_cursor"]
-
     return None
+
+
+def find_today_child_page(parent_id: str) -> str | None:
+    """오늘 날짜 하위 페이지 ID를 반환
+
+    우선순위:
+    1) 월별 컨테이너(YYYY-MM) 아래 탐색
+    2) 부모 페이지 직속에서 직접 탐색 (레거시/수동 구조 호환)
+    """
+    today = effective_date()
+    title = today.strftime("%Y-%m-%d")
+
+    # 이번 달 컨테이너 안에서 탐색
+    month_id = get_diary_month_container(today.year, today.month)
+    found = _find_child_page_by_title(month_id, title)
+    if found:
+        return found
+
+    # 레거시 구조: 부모 페이지 바로 아래에 날짜 페이지가 있는 경우
+    return _find_child_page_by_title(parent_id, title)
 
 
 # ─── 노션 콘텐츠 가져오기 ────────────────────────────────────────────────────

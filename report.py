@@ -20,6 +20,7 @@ from datetime import datetime, date, timedelta
 from zoneinfo import ZoneInfo
 from dotenv import load_dotenv
 from notion_client import Client
+from notion_client.errors import APIResponseError
 
 KST = ZoneInfo("Asia/Seoul")
 
@@ -356,23 +357,32 @@ def build_report_blocks(analysis: dict, snippets: list[dict], priority_rate: flo
 def find_or_create_child_page(parent_id: str, title: str) -> str:
     """부모 페이지 아래에서 title 하위 페이지를 찾거나 새로 생성 후 ID 반환"""
     cursor = None
-    while True:
-        resp = notion.blocks.children.list(
-            block_id=parent_id, start_cursor=cursor, page_size=100
-        )
-        for block in resp["results"]:
-            if block.get("type") == "child_page":
-                if block["child_page"]["title"] == title:
-                    return block["id"]
-        if not resp.get("has_more"):
-            break
-        cursor = resp["next_cursor"]
+    try:
+        while True:
+            resp = notion.blocks.children.list(
+                block_id=parent_id, start_cursor=cursor, page_size=100
+            )
+            for block in resp["results"]:
+                if block.get("type") == "child_page":
+                    if block["child_page"]["title"] == title:
+                        return block["id"]
+            if not resp.get("has_more"):
+                break
+            cursor = resp["next_cursor"]
 
-    page = notion.pages.create(
-        parent={"page_id": parent_id},
-        properties={"title": {"title": [{"type": "text", "text": {"content": title}}]}},
-    )
-    return page["id"]
+        page = notion.pages.create(
+            parent={"page_id": parent_id},
+            properties={"title": {"title": [{"type": "text", "text": {"content": title}}]}},
+        )
+        return page["id"]
+    except APIResponseError as exc:
+        # Keep this short and structured so backend dashboard truncation still shows root cause.
+        raise RuntimeError(
+            "Notion API failed in find_or_create_child_page "
+            f"(parent_id={parent_id}, title={title}, "
+            f"code={getattr(exc, 'code', 'unknown')}, status={getattr(exc, 'status', 'unknown')}, "
+            f"message={str(exc)})"
+        ) from exc
 
 
 def clear_page_blocks(page_id: str):
