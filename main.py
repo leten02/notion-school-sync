@@ -59,17 +59,30 @@ GEMINI_URL    = (
 
 notion = Client(auth=NOTION_TOKEN)
 
+# ─── 일기 월별 컨테이너 ───────────────────────────────────────────────────────
+
+def get_diary_month_container(year: int, month: int) -> str:
+    """일기 월별 컨테이너 페이지 ID 반환 (없으면 자동 생성)
+    NOTION_PAGE_ID 바로 아래에 '2026-03' 형태로 생성됨
+    """
+    title = f"{year}-{month:02d}"
+    return report_module.find_or_create_child_page(NOTION_PAGE_ID, title)
+
+
 # ─── 노션 오늘 날짜 하위 페이지 찾기 ─────────────────────────────────────────
 
 def find_today_child_page(parent_id: str) -> str | None:
-    """부모 페이지에서 오늘 날짜 하위 페이지 ID를 찾아 반환 (KST 9시 기준)"""
+    """오늘 날짜 하위 페이지 ID를 반환 (월별 컨테이너 안에서 탐색)"""
     today = effective_date()
     title = today.strftime("%Y-%m-%d")
+
+    # 이번 달 컨테이너 안에서 탐색
+    month_id = get_diary_month_container(today.year, today.month)
 
     cursor = None
     while True:
         resp = notion.blocks.children.list(
-            block_id=parent_id,
+            block_id=month_id,
             start_cursor=cursor,
             page_size=100,
         )
@@ -434,10 +447,12 @@ DAILY_TEMPLATE = [
 
 
 def create_today_notion_page(title: str) -> str | None:
-    """오늘 날짜 노션 페이지 자동 생성 (템플릿 포함), 생성된 page_id 반환"""
+    """오늘 날짜 노션 페이지 자동 생성 (월별 컨테이너 아래, 템플릿 포함)"""
+    today = effective_date()
+    month_id = get_diary_month_container(today.year, today.month)
     try:
         page = notion.pages.create(
-            parent={"page_id": NOTION_PAGE_ID},
+            parent={"page_id": month_id},
             properties={
                 "title": {"title": [{"type": "text", "text": {"content": title}}]}
             },
