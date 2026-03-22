@@ -106,7 +106,7 @@ export default function SettingsPage() {
 
       <form className="card stack" onSubmit={onSubmit}>
         <label className="stack">
-          <span className="label">Notion 토큰 (`NOTION_TOKEN`)</span>
+          <span className="label">Notion 토큰</span>
           <input
             className="input"
             type="password"
@@ -115,13 +115,19 @@ export default function SettingsPage() {
             placeholder="secret_..."
             autoComplete="off"
           />
+          <span className="field-help">
+            발급:{" "}
+            <a href="https://www.notion.so/my-integrations" target="_blank" rel="noreferrer">
+              notion.so/my-integrations
+            </a>
+          </span>
           <span className="muted">
             현재 저장 상태: {hasNotionToken ? "저장됨" : "없음"} (빈칸 저장 시 기존 값 유지)
           </span>
         </label>
 
         <label className="stack">
-          <span className="label">Notion 부모 페이지 ID (`NOTION_PAGE_ID`)</span>
+          <span className="label">Notion 부모 페이지 ID</span>
           <input
             className="input"
             value={form.notionPageId}
@@ -132,7 +138,7 @@ export default function SettingsPage() {
         </label>
 
         <label className="stack">
-          <span className="label">1000.school API 키 (`SCHOOL_API_KEY`)</span>
+          <span className="label">1000.school API 키</span>
           <input
             className="input"
             type="password"
@@ -141,13 +147,23 @@ export default function SettingsPage() {
             placeholder="I_wrdo_..."
             autoComplete="off"
           />
+          <span className="field-help">
+            발급:{" "}
+            <a
+              href="https://app.1000.school/settings?menu=api"
+              target="_blank"
+              rel="noreferrer"
+            >
+              app.1000.school/settings?menu=api
+            </a>
+          </span>
           <span className="muted">
             현재 저장 상태: {hasSchoolApiKey ? "저장됨" : "없음"} (빈칸 저장 시 기존 값 유지)
           </span>
         </label>
 
         <label className="stack">
-          <span className="label">Gemini API 키 (`GEMINI_API_KEY`)</span>
+          <span className="label">Gemini API 키</span>
           <input
             className="input"
             type="password"
@@ -156,6 +172,12 @@ export default function SettingsPage() {
             placeholder="AIzaSy..."
             autoComplete="off"
           />
+          <span className="field-help">
+            발급:{" "}
+            <a href="https://aistudio.google.com/app/apikey" target="_blank" rel="noreferrer">
+              aistudio.google.com/app/apikey
+            </a>
+          </span>
           <span className="muted">
             현재 저장 상태: {hasGeminiApiKey ? "저장됨" : "없음"} (빈칸 저장 시 기존 값 유지)
           </span>

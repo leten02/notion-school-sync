@@ -16,28 +16,19 @@ export default async function ProtectedLayout({
   }
 
   return (
-    <main style={{ minHeight: "100vh", padding: "28px 0 48px" }}>
+    <main className="app-shell">
       <div className="container">
-        <header
-          className="card"
-          style={{
-            marginBottom: 18,
-            display: "flex",
-            gap: 12,
-            alignItems: "center",
-            justifyContent: "space-between",
-            flexWrap: "wrap"
-          }}
-        >
-          <div style={{ display: "grid", gap: 6 }}>
-            <strong>Notion School Sync</strong>
+        <header className="card app-header">
+          <div className="app-brand-wrap">
+            <strong className="app-brand">
+              <span className="app-brand-notion">NOTION</span>
+              <span className="app-brand-sep">-</span>
+              <span className="app-brand-snippet">DAILY SNIPPET</span>
+            </strong>
             <span className="muted">{user.email}</span>
           </div>
 
-          <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
-            <Link className="button secondary" href="/dashboard">
-              대시보드
-            </Link>
+          <div className="app-nav">
             <Link className="button secondary" href="/settings">
               API 키 입력
             </Link>
