@@ -38,6 +38,64 @@
 
 ---
 
+## 배포 아키텍처 (Vercel + Supabase + Render)
+
+현재 운영 흐름은 아래 구조로 동작합니다.
+
+```
+브라우저(Vercel)
+  → 로그인(Supabase Auth + Google OAuth)
+  → 백엔드(Render FastAPI) 호출
+  → DB(Supabase Postgres) 읽기/쓰기
+  → Gemini / Notion / 1000.school 연동
+```
+
+### 구성 요소 역할
+
+| 구성 요소 | 역할 |
+|---|---|
+| **Vercel (Next.js)** | 로그인/설정/대시보드 UI 제공, 사용자 브라우저 진입점 |
+| **Supabase Auth** | Google OAuth 로그인, 세션/토큰 관리 |
+| **Render (FastAPI)** | 유저/설정/상태 API, 키 암호화 저장, 스케줄러 실행 |
+| **Supabase Postgres** | `users`, `user_settings`, `snippets`, `user_state`, `analysis` 저장 |
+| **Notion API** | 페이지 변경 감지, 주간/월간 리포트 페이지 생성 |
+| **1000.school API** | 일간/주간 스니펫 업로드 |
+| **Gemini API** | 스니펫 자동 다듬기 + 주간/월간 분석 생성 |
+
+### 사용자 요청 흐름 (로그인~저장)
+
+```mermaid
+sequenceDiagram
+  participant U as User Browser (Vercel)
+  participant S as Supabase Auth
+  participant G as Google OAuth
+  participant B as FastAPI (Render)
+  participant D as Supabase DB
+
+  U->>S: Google 로그인 시작
+  S->>G: OAuth 인증 요청
+  G-->>S: 인증 완료
+  S-->>U: 세션(access token) 반환
+  U->>B: /users/me/sync, /settings/me (Bearer 토큰)
+  B->>S: 토큰 검증
+  B->>D: 유저/설정/상태 조회·저장
+  D-->>B: 결과 반환
+  B-->>U: 대시보드 데이터 반환
+```
+
+### 스케줄러 실행 흐름 (백엔드 자동 작업)
+
+```mermaid
+flowchart LR
+  SCH[APScheduler on Render] --> DB[(Supabase DB)]
+  SCH --> N[Notion API]
+  SCH --> GM[Gemini API]
+  SCH --> S1000[1000.school API]
+  DB --> SCH
+```
+
+---
+
 ## 주요 기능
 
 ### 1. 자동 변경 감지 & AI 다듬기 업로드
