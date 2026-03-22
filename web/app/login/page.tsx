@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import Image from "next/image";
 import { createClient } from "@/lib/supabase/client";
 
 export default function LoginPage() {
@@ -45,6 +46,34 @@ export default function LoginPage() {
             {loading ? "Google 로그인 이동 중..." : "구글 로그인"}
           </button>
           {error && <p className="error">{error}</p>}
+        </div>
+
+        <div className="hero-partners">
+          <div className="hero-logo-box">
+            <Image
+              src="/assets/notion.png"
+              alt="Notion logo"
+              className="hero-logo-img notion"
+              width={220}
+              height={72}
+              priority
+            />
+          </div>
+          <div className="hero-partner-link" aria-hidden="true">
+            <span />
+            <span />
+            <span />
+          </div>
+          <div className="hero-logo-box">
+            <Image
+              src="/assets/cocone.png"
+              alt="Gachon Cocone School logo"
+              className="hero-logo-img cocone"
+              width={280}
+              height={88}
+              priority
+            />
+          </div>
         </div>
       </section>
     </main>
