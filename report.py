@@ -496,7 +496,7 @@ def save_weekly_snippet_to_school(content: str, week_monday: str) -> dict:
         print("   ✏️  새 주간 스니펫 작성 중...")
         resp = requests.post(
             f"{API_BASE}/weekly-snippets",
-            json={"content": content},
+            json={"content": content, "week": week_monday},
             headers=headers,
         )
 
