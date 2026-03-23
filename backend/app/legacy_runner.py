@@ -62,7 +62,11 @@ def _run_python(code: str, env: dict[str, str], timeout: int) -> dict:
 def run_daily_sync(secrets: UserSecrets, last_sync_at: str | None) -> dict:
     code = r"""
 import datetime, json, os
+from zoneinfo import ZoneInfo
 import main
+
+KST = ZoneInfo("Asia/Seoul")
+DAY_START_HOUR = 9
 
 def parse_iso(value):
     if not value:
@@ -73,8 +77,18 @@ def parse_iso(value):
 
 page_id = main.find_today_child_page(os.environ["NOTION_PAGE_ID"])
 if not page_id:
-    print("__RESULT__" + json.dumps({"status": "no_page"}))
-    raise SystemExit(0)
+    now = datetime.datetime.now(KST)
+    if now.hour >= DAY_START_HOUR:
+        # 오전 9시 이후 → 오늘 날짜 페이지 자동 생성
+        today = main.effective_date()
+        title = today.strftime("%Y-%m-%d")
+        page_id = main.create_today_notion_page(title)
+        if not page_id:
+            print("__RESULT__" + json.dumps({"status": "page_creation_failed"}))
+            raise SystemExit(0)
+    else:
+        print("__RESULT__" + json.dumps({"status": "no_page"}))
+        raise SystemExit(0)
 
 edited = main.get_page_last_edited(page_id)
 last_sync = os.getenv("LAST_SYNC_AT", "")
