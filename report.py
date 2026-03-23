@@ -505,16 +505,20 @@ def save_weekly_snippet_to_school(content: str, week_monday: str) -> dict:
 
 
 def gemini_weekly_snippet(snippets: list[dict], week_monday: date,
-                          analysis: dict = None) -> str:
+                          analysis: dict = None,
+                          week_end: date = None) -> str:
     """
     일간 스니펫 + AI 감독 분석 → 1000.school용 주간 스니펫 콘텐츠 생성 (Gemini)
     analysis가 주어지면 7지표 점수·요약·개선영역도 프롬프트에 포함해 더 풍부한 내용 생성
+    week_end: 실제 데이터 범위 끝 날짜 (미지정 시 week_monday + 6일 = 일요일)
     """
     if not GEMINI_API_KEY:
         raise RuntimeError("GEMINI_API_KEY 없음")
 
-    week_end = week_monday + timedelta(days=6)
-    period   = f"{week_monday.strftime('%m/%d')}~{week_end.strftime('%m/%d')}"
+    # week_end가 주어지지 않으면 해당 주 일요일로 계산
+    if week_end is None:
+        week_end = week_monday + timedelta(days=6)
+    period = f"{week_monday.strftime('%m/%d')}~{week_end.strftime('%m/%d')}"
 
     # ── 일간 스니펫 요약 블록
     daily_summaries = []
@@ -712,7 +716,7 @@ def run_weekly(target_monday: date = None):
     # ── 1000.school 주간 스니펫 업로드 (일간 스니펫 + AI 분석 종합)
     print(f"   📤 1000.school 주간 스니펫 업로드 중...")
     try:
-        weekly_content = gemini_weekly_snippet(snippets, target_monday, analysis=analysis)
+        weekly_content = gemini_weekly_snippet(snippets, target_monday, analysis=analysis, week_end=week_end)
         result = save_weekly_snippet_to_school(weekly_content, target_monday.strftime("%Y-%m-%d"))
         print(f"   ✅ 주간 스니펫 업로드 완료 (id={result.get('id')})")
     except Exception as e:

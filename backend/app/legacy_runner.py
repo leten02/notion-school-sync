@@ -86,6 +86,9 @@ if not page_id:
         if not page_id:
             print("__RESULT__" + json.dumps({"status": "page_creation_failed"}))
             raise SystemExit(0)
+        # 새로 생성된 페이지는 빈 템플릿뿐 → 다음 루프에서 내용 작성 후 sync
+        print("__RESULT__" + json.dumps({"status": "page_created"}))
+        raise SystemExit(0)
     else:
         print("__RESULT__" + json.dumps({"status": "no_page"}))
         raise SystemExit(0)
