@@ -120,6 +120,36 @@ else:
     return _run_python(code, env, timeout=240)
 
 
+def create_today_page(secrets: UserSecrets) -> dict:
+    code = r"""
+import datetime, json, os
+from zoneinfo import ZoneInfo
+import main
+
+KST = ZoneInfo("Asia/Seoul")
+
+try:
+    page_id = main.find_today_child_page(os.environ["NOTION_PAGE_ID"])
+except Exception as exc:
+    print("__RESULT__" + json.dumps({"status": "notion_api_error", "error": str(exc)[:300]}))
+    raise SystemExit(0)
+
+if page_id:
+    print("__RESULT__" + json.dumps({"status": "already_exists", "page_id": page_id}))
+    raise SystemExit(0)
+
+today = main.effective_date()
+title = today.strftime("%Y-%m-%d")
+page_id = main.create_today_notion_page(title)
+if not page_id:
+    print("__RESULT__" + json.dumps({"status": "page_creation_failed"}))
+    raise SystemExit(0)
+
+print("__RESULT__" + json.dumps({"status": "page_created", "title": title, "page_id": page_id}))
+"""
+    return _run_python(code, _build_env(secrets), timeout=60)
+
+
 def run_weekly_report(secrets: UserSecrets, target_monday: date) -> dict:
     code = r"""
 import datetime, json, os

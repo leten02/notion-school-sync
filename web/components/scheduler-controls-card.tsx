@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import { runSchedulerJob } from "@/lib/backend/api";
+import { createTodayNotionPage, runSchedulerJob } from "@/lib/backend/api";
 
 export function SchedulerControlsCard() {
   const [running, setRunning] = useState<string | null>(null);
@@ -24,6 +24,25 @@ export function SchedulerControlsCard() {
     }
   };
 
+  const handleCreateTodayPage = async () => {
+    setRunning("create-today-page");
+    setMessage("노션 페이지 생성 중...");
+    try {
+      const result = await createTodayNotionPage();
+      if (result.status === "already_exists") {
+        setMessage("오늘 페이지가 이미 존재합니다.");
+      } else if (result.status === "page_created") {
+        setMessage(`✅ ${result.title} 페이지가 생성됐습니다!`);
+      } else {
+        setMessage(`실패: ${result.status}${result.error ? ` (${result.error})` : ""}`);
+      }
+    } catch (error) {
+      setMessage(error instanceof Error ? `실행 실패: ${error.message}` : "실행 실패");
+    } finally {
+      setRunning(null);
+    }
+  };
+
   return (
     <article className="card stack">
       <h2 style={{ margin: 0 }}>수동 실행</h2>
@@ -31,6 +50,13 @@ export function SchedulerControlsCard() {
         스케줄 시간과 무관하게 바로 실행합니다.
       </p>
       <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+        <button
+          className="button"
+          disabled={Boolean(running)}
+          onClick={handleCreateTodayPage}
+        >
+          {running === "create-today-page" ? "생성 중..." : "📄 오늘 노션 페이지 생성"}
+        </button>
         <button
           className="button secondary"
           disabled={Boolean(running)}

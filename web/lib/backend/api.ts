@@ -98,3 +98,10 @@ export async function runSchedulerJob(type: SchedulerRunType) {
     method: "POST"
   });
 }
+
+export async function createTodayNotionPage() {
+  return authedRequest<{ status: string; title?: string; page_id?: string; error?: string }>(
+    "/dashboard/me/create-today-page",
+    { method: "POST" }
+  );
+}
