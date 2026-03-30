@@ -120,6 +120,70 @@ else:
     return _run_python(code, env, timeout=240)
 
 
+def trigger_daily_ai_score(secrets: UserSecrets) -> dict:
+    """일간 스니펫 AI 채점 (GET /daily-snippets/feedback)"""
+    code = r"""
+import json, os, requests
+
+API_BASE = "https://api.1000.school"
+headers = {
+    "Authorization": f"Bearer {os.environ['SCHOOL_API_KEY']}",
+    "Content-Type": "application/json",
+}
+try:
+    resp = requests.get(f"{API_BASE}/daily-snippets/feedback", headers=headers, timeout=60)
+    resp.raise_for_status()
+    data = resp.json()
+    import json as _json
+    feedback_str = data.get("feedback", "{}")
+    feedback = _json.loads(feedback_str) if isinstance(feedback_str, str) else feedback_str
+    total_score = feedback.get("total_score", "?")
+    print(f"✅ 일간 AI 채점 완료: {total_score}점")
+    print("__RESULT__" + json.dumps({"status": "ok", "date": data.get("date"), "total_score": total_score}))
+except Exception as exc:
+    print("__RESULT__" + json.dumps({"status": "error", "error": str(exc)[:300]}))
+    raise SystemExit(0)
+"""
+    return _run_python(code, _build_env(secrets), timeout=120)
+
+
+def trigger_weekly_ai_score(secrets: UserSecrets, target_monday: date) -> dict:
+    """전주 주간 스니펫 최신화 + AI 채점 (GET /weekly-snippets/feedback)"""
+    code = r"""
+import datetime, json, os, requests
+import report
+
+API_BASE = "https://api.1000.school"
+
+# 전주 주간 리포트 재실행 (최신 내용으로 업데이트)
+y, m, d = [int(x) for x in os.environ["TARGET_MONDAY"].split("-")]
+report.sync_snippets()
+report.run_weekly(datetime.date(y, m, d))
+
+# 주간 스니펫 AI 채점
+headers = {
+    "Authorization": f"Bearer {os.environ['SCHOOL_API_KEY']}",
+    "Content-Type": "application/json",
+}
+try:
+    resp = requests.get(f"{API_BASE}/weekly-snippets/feedback", headers=headers, timeout=60)
+    resp.raise_for_status()
+    data = resp.json()
+    import json as _json
+    feedback_str = data.get("feedback", "{}")
+    feedback = _json.loads(feedback_str) if isinstance(feedback_str, str) else feedback_str
+    total_score = feedback.get("total_score", "?")
+    print(f"✅ 주간 AI 채점 완료: {total_score}점")
+    print("__RESULT__" + json.dumps({"status": "ok", "week": data.get("week"), "total_score": total_score}))
+except Exception as exc:
+    print("__RESULT__" + json.dumps({"status": "error", "error": str(exc)[:300]}))
+    raise SystemExit(0)
+"""
+    env = _build_env(secrets)
+    env["TARGET_MONDAY"] = target_monday.strftime("%Y-%m-%d")
+    return _run_python(code, env, timeout=600)
+
+
 def create_today_page(secrets: UserSecrets) -> dict:
     code = r"""
 import datetime, json, os

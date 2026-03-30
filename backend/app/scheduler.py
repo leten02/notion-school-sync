@@ -7,7 +7,14 @@ from zoneinfo import ZoneInfo
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
-from .legacy_runner import UserSecrets, run_daily_sync, run_monthly_report, run_weekly_report
+from .legacy_runner import (
+    UserSecrets,
+    run_daily_sync,
+    run_monthly_report,
+    run_weekly_report,
+    trigger_daily_ai_score,
+    trigger_weekly_ai_score,
+)
 from .repositories import (
     SettingsRepository,
     UserRepository,
@@ -154,6 +161,66 @@ class SchedulerJobRunner:
     def run_monthly_report(self):
         self._run_for_all_users("monthly-report")
 
+    def run_daily_ai_score(self):
+        """매일 8:59 - 일간 스니펫 AI 채점"""
+        if not self._lock.acquire(blocking=False):
+            logger.info("Scheduler lock active. Skip job=daily-ai-score")
+            return
+        try:
+            users = self.user_repo.list_active()
+            for user in users:
+                user_id = str(user["id"])
+                settings = self.settings_repo.get(user_id)
+                if not settings or not settings.get("school_api_key_enc"):
+                    continue
+                try:
+                    secrets = self._build_user_secrets(user_id, settings)
+                    result = trigger_daily_ai_score(secrets)
+                    self.state_repo.upsert(user_id, {
+                        "last_status": f"daily_ai_score_{result.get('status', 'unknown')}",
+                        "last_error": None,
+                    })
+                    logger.info("daily_ai_score user=%s score=%s", user_id, result.get("total_score"))
+                except Exception as exc:
+                    logger.exception("daily_ai_score failed user=%s", user_id)
+                    self.state_repo.upsert(user_id, {
+                        "last_status": "daily_ai_score_error",
+                        "last_error": self._short_error(exc),
+                    })
+        finally:
+            self._lock.release()
+
+    def run_weekly_ai_score(self):
+        """월요일 8:59 - 전주 주간 스니펫 최신화 + AI 채점"""
+        if not self._lock.acquire(blocking=False):
+            logger.info("Scheduler lock active. Skip job=weekly-ai-score")
+            return
+        try:
+            today = datetime.now(self._timezone).date()
+            target_monday = today - timedelta(days=today.weekday() + 7)  # 지난주 월요일
+            users = self.user_repo.list_active()
+            for user in users:
+                user_id = str(user["id"])
+                settings = self.settings_repo.get(user_id)
+                if not settings or not settings.get("school_api_key_enc"):
+                    continue
+                try:
+                    secrets = self._build_user_secrets(user_id, settings)
+                    result = trigger_weekly_ai_score(secrets, target_monday)
+                    self.state_repo.upsert(user_id, {
+                        "last_status": f"weekly_ai_score_{result.get('status', 'unknown')}",
+                        "last_error": None,
+                    })
+                    logger.info("weekly_ai_score user=%s score=%s", user_id, result.get("total_score"))
+                except Exception as exc:
+                    logger.exception("weekly_ai_score failed user=%s", user_id)
+                    self.state_repo.upsert(user_id, {
+                        "last_status": "weekly_ai_score_error",
+                        "last_error": self._short_error(exc),
+                    })
+        finally:
+            self._lock.release()
+
 
 def create_scheduler(timezone: str) -> tuple[AsyncIOScheduler, SchedulerJobRunner]:
     runner = SchedulerJobRunner(timezone=timezone)
@@ -185,6 +252,40 @@ def create_scheduler(timezone: str) -> tuple[AsyncIOScheduler, SchedulerJobRunne
         hour=9,
         minute=0,
         id="monthly-report-all-users",
+        replace_existing=True,
+        coalesce=True,
+        max_instances=1,
+    )
+    # ── 매일 8:58 강제 노션 동기화 (채점 1분 전 최신화)
+    scheduler.add_job(
+        runner.run_notion_sync,
+        trigger="cron",
+        hour=8,
+        minute=58,
+        id="pre-score-notion-sync",
+        replace_existing=True,
+        coalesce=True,
+        max_instances=1,
+    )
+    # ── 매일 8:59 일간 스니펫 AI 채점
+    scheduler.add_job(
+        runner.run_daily_ai_score,
+        trigger="cron",
+        hour=8,
+        minute=59,
+        id="daily-ai-score-all-users",
+        replace_existing=True,
+        coalesce=True,
+        max_instances=1,
+    )
+    # ── 월요일 8:57 전주 주간 스니펫 최신화 + AI 채점
+    scheduler.add_job(
+        runner.run_weekly_ai_score,
+        trigger="cron",
+        day_of_week="mon",
+        hour=8,
+        minute=57,
+        id="weekly-ai-score-all-users",
         replace_existing=True,
         coalesce=True,
         max_instances=1,
